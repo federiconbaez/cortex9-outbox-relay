@@ -32,6 +32,8 @@ class ValueObjectsTest {
     assertThat(p).isNotEqualTo("x");
     assertThat(p.hashCode()).isEqualTo(Payload.of(new byte[] {1, 2, 3}).hashCode());
     assertThat(p).hasToString("Payload[3 bytes]");
+    assertThat(Payload.of(new byte[] {1}).hashCode())
+        .isNotEqualTo(Payload.of(new byte[] {2}).hashCode());
   }
 
   @Test

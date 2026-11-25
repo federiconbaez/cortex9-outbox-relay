@@ -26,6 +26,10 @@ class BackoffPolicyTest {
         new BackoffPolicy(Duration.ofMillis(3), Duration.ofMillis(Long.MAX_VALUE / 2 + 7), 1);
     assertThat(huge.ceilingMillis(Integer.MAX_VALUE)).isEqualTo(Long.MAX_VALUE / 2 + 7);
     assertThat(huge.ceilingMillis(2)).isEqualTo(6);
+    BackoffPolicy max =
+        new BackoffPolicy(Duration.ofMillis(3), Duration.ofMillis(Long.MAX_VALUE), 1);
+    assertThat(max.ceilingMillis(64)).isEqualTo(Long.MAX_VALUE);
+    assertThat(max.ceilingMillis(62)).isEqualTo(3L << 61);
   }
 
   @Test
@@ -34,6 +38,9 @@ class BackoffPolicyTest {
     assertThat(p.ceilingMillis(2)).isEqualTo(100);
     BackoffPolicy odd = new BackoffPolicy(Duration.ofMillis(51), Duration.ofMillis(101), 1);
     assertThat(odd.ceilingMillis(2)).isEqualTo(101);
+    BackoffPolicy halfOfOdd = new BackoffPolicy(Duration.ofMillis(50), Duration.ofMillis(101), 1);
+    assertThat(halfOfOdd.ceilingMillis(2)).isEqualTo(100);
+    assertThat(halfOfOdd.ceilingMillis(3)).isEqualTo(101);
   }
 
   @Test
