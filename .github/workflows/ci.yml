@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: resolve dependencies (retries ante 429 de Maven Central)
+        run: |
+          for i in 1 2 3; do
+            mvn -B -ntp -q dependency:go-offline && exit 0
+            echo "intento $i fallido, reintento en $((i*20))s"; sleep $((i*20))
+          done
+          echo "prefetch incompleto: verify resuelve lo que falte con los reintentos de .mvn/maven.config"
+      - name: verify (Error Prone + NullAway, tests JUnit/jqwik/ArchUnit, JaCoCo check, Spotless check)
+        run: mvn -B -ntp verify
+      - name: domain branch coverage
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import csv
+          rows=[r for r in csv.DictReader(open('target/site/jacoco/jacoco.csv')) if r['PACKAGE'].endswith('.domain')]
+          c=sum(int(r['BRANCH_COVERED']) for r in rows); m=sum(int(r['BRANCH_MISSED']) for r in rows)
+          print(f"domain branch coverage: {c}/{c+m} = {100*c/(c+m):.1f}%")
+          PY
+      - name: mutation testing (PIT, domain, threshold 80%)
+        run: |
+          mvn -B -ntp org.pitest:pitest-maven:mutationCoverage
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import xml.etree.ElementTree as ET
+          ms=list(ET.parse('target/pit-reports/mutations.xml').getroot())
+          k=sum(1 for m in ms if m.get('status')=='KILLED')
+          print(f"PIT domain mutation score: {k}/{len(ms)} = {100*k/len(ms):.1f}%")
+          PY
+      - name: gitleaks
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz | tar xz gitleaks
+          ./gitleaks git . --no-banner --redact
