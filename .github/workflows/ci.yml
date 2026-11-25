@@ -11,6 +11,7 @@ permissions:
 jobs:
   gates:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,13 +21,6 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
-      - name: resolve dependencies (retries ante 429 de Maven Central)
-        run: |
-          for i in 1 2 3; do
-            mvn -B -ntp -q dependency:go-offline && exit 0
-            echo "intento $i fallido, reintento en $((i*20))s"; sleep $((i*20))
-          done
-          echo "prefetch incompleto: verify resuelve lo que falte con los reintentos de .mvn/maven.config"
       - name: verify (Error Prone + NullAway, tests JUnit/jqwik/ArchUnit, JaCoCo check, Spotless check)
         run: mvn -B -ntp verify
       - name: domain branch coverage
