@@ -1,8 +1,9 @@
 # cortex9-outbox-relay
 
 Patrón **transactional outbox** en **Java 21**, arquitectura hexagonal, sin frameworks.
-Proyecto de estudio y portfolio (CX9-6203): no hay broker ni base de datos reales; todo corre en
-memoria con fakes escritos a mano.
+Proyecto de estudio y portfolio (CX9-6203, CX9-6204). No hay broker real. El outbox y el dedupe
+tienen dos implementaciones: fakes en memoria escritos a mano y un adapter durable sobre **SQLite**.
+Las dos pasan la misma suite de contrato.
 
 ## Qué hace
 
@@ -19,18 +20,26 @@ memoria con fakes escritos a mano.
   o ante un `Permanent` del publisher.
 - **Consumidor idempotente** (ADR-0002): `IdempotentConsumer` + `DedupeStore` convierten
   at-least-once en *effectively-once*: el efecto corre una vez por `MessageId`.
+- **Adapter durable SQLite** (ADR-0003): `SqliteOutboxDatabase` y `SqliteDedupeStore` usan
+  transacciones `BEGIN IMMEDIATE`, WAL y esquema versionado. Corren las mismas suites de contrato que
+  los fakes. También tienen pruebas de reinicio (cerrar y reabrir), de dos conexiones sobre el mismo
+  archivo y de ida y vuelta sin pérdida (propiedad jqwik).
 - **Estados y errores sellados**: `OutboxStatus` (`Pending | InFlight | Published | Quarantined`),
   `QuarantineReason`, `DomainError`, `Result`, `PublishResult` (`Ack | Transient | Permanent`),
   `UpdateOutcome`. Los `switch` son exhaustivos y los chequea el compilador.
 
 ## Qué NO hace
 
-- No hay Kafka, RabbitMQ ni base real; tampoco CDC/log tailing ni HTTP.
+- No hay Kafka, RabbitMQ, CDC/log tailing ni HTTP. No hay adapter para Postgres/MySQL.
+- SQLite serializa a todos los escritores: es un adapter durable para un nodo, o para pocos procesos
+  en la misma máquina. No sirve para varios hosts ni para un sistema de archivos de red.
 - No garantiza orden por agregado después de reintentos.
 - No limpia mensajes publicados ni pone TTL al `DedupeStore`.
 - Asume un reloj común entre relays (en producción, el de la base). Con relojes desincronizados la
   exclusión por lease no está garantizada.
-- La atomicidad "dedupe + efecto" del consumidor está simulada con un lock en memoria.
+- La atomicidad "dedupe + efecto" del consumidor solo es real si el efecto escribe en la misma
+  base. Con `SqliteDedupeStore`, un efecto externo puede repetirse si el proceso muere entre el
+  efecto y el commit. En memoria se simula con un lock.
 
 Detalle en [CONTRACT.md](CONTRACT.md) y [docs/adr](docs/adr).
 
@@ -44,6 +53,8 @@ application/         OutboxWriter, Relay, IdempotentConsumer, RelayConfig, Relay
                      Clock, RandomSource, IdGenerator, DedupeStore, Transition, UpdateOutcome
 adapter/inmemory/    InMemoryOutboxDatabase (UnitOfWork + OutboxStore, crashes inyectables),
                      InMemoryDedupeStore, ManualClock, SeededRandomSource, ...
+adapter/sqlite/      SqliteOutboxDatabase, SqliteDedupeStore, OutboxRows (fila <-> dominio),
+                     StorageException (único paquete que ve java.sql)
 adapter/fake/        ScriptedPublisher (ACK, TRANSIENT, PERMANENT, DELIVER_THEN_TRANSIENT, THROW)
 ```
 
@@ -51,17 +62,32 @@ adapter/fake/        ScriptedPublisher (ACK, TRANSIENT, PERMANENT, DELIVER_THEN_
 
 | Gate | Resultado |
 |---|---|
-| Tests (JUnit 5 + jqwik + ArchUnit) | **70 tests**, 0 fallas |
-| Propiedades jqwik | 7 propiedades, 4.700 casos generados por corrida |
+| Tests (JUnit 5 + jqwik + ArchUnit) | **103 tests**, 0 fallas |
+| Propiedades jqwik | 8 propiedades, 5.000 casos generados por corrida (300 de ida y vuelta por SQLite) |
 | Cobertura de ramas del dominio (JaCoCo) | **60/60 = 100 %** (el build falla si baja de 95 %) |
+| Cobertura de ramas del adapter SQLite (JaCoCo) | 58/64 = 90,6 % (informativo) |
 | Mutation testing PIT (dominio) | **79/80 = 98,8 %** (umbral 80 %) |
+| Mutation testing PIT (adapter SQLite) | **106/114 = 93,0 %** (umbral 80 % en CI) |
 | Error Prone + NullAway | activos en código de producción |
 | Formato | Spotless + google-java-format (check en `verify`) |
 | Secretos | gitleaks en CI |
-| Arquitectura | 7 reglas ArchUnit (dominio sin I/O, sin concurrencia, sin `java.util.Random`, puertos solo interfaces/records, sin frameworks) |
+| Arquitectura | 9 reglas ArchUnit (dominio sin I/O, sin concurrencia, sin `java.util.Random`, puertos solo interfaces/records, sin frameworks, `java.sql` solo en `adapter.sqlite`, adapters sin dependencias cruzadas) |
 
-El mutante sobreviviente es equivalente: cambiar `value < cap` por `value <= cap` en la condición
-del loop de `ceilingMillis` da el mismo techo.
+El mutante sobreviviente del dominio es equivalente: cambiar `value < cap` por `value <= cap` en
+la condición del loop de `ceilingMillis` da el mismo techo.
+
+Los 8 mutantes que sobreviven en el adapter SQLite son equivalentes o defensivos. Los revisé uno
+por uno:
+- `setNull` sobre un parámetro que, si no se liga, ya vale NULL.
+- Devolver `Boolean.FALSE` en vez de `TRUE` en lambdas cuyo valor nadie usa.
+- El chequeo "la fila desapareció durante el update", que es inalcanzable bajo el lock de escritura.
+- El rollback tras un `COMMIT` fallido, que no sé provocar de forma determinista.
+
+Un mutante manual también sobrevive: sacar la comparación de nanosegundos del `WHERE` de
+`claimDue`. Es redundante, porque el orden por (segundos, nanos) y el chequeo `isDue` del dominio
+ya excluyen lo que no venció. Sí lo detectan otros dos mutantes manuales: cambiar `BEGIN IMMEDIATE`
+por `BEGIN` (lo detecta la prueba de dos conexiones) y perder los nanos al escribir (lo detecta la
+propiedad de ida y vuelta).
 
 ### Propiedades que se verifican
 
@@ -78,17 +104,37 @@ del loop de `ceilingMillis` da el mismo techo.
    cuantil de jitter, demoras monótonas.
 
 Sin Mockito: `ScriptedPublisher`, `InMemoryOutboxDatabase` con crashes inyectables, `ManualClock`,
-`SeededRandomSource`. La suite abstracta `OutboxStoreContract` (8 casos, incluye 8 hilos
-reclamando 500 mensajes sin duplicar ninguno) sirve para validar un futuro adapter JDBC.
+`SeededRandomSource`. Las suites abstractas `OutboxStoreContract` (12 casos, incluye 8 hilos
+reclamando 500 mensajes sin duplicar ninguno y la precisión de nanosegundos en `nextAttemptAt`) y
+`DedupeStoreContract` (3 casos, incluye 8 entregas concurrentes del mismo id) corren contra los
+fakes y contra SQLite. `SqliteDurabilityTest` agrega lo que solo una base real puede probar:
+- el estado sobrevive a cerrar y reabrir;
+- dos conexiones con dos hilos cada una no reclaman nada dos veces;
+- un relay que se reinicia retoma el trabajo y el consumidor aplica cada efecto una vez;
+- una fila corrupta o un error de SQL da `StorageException` con rollback;
+- un esquema más nuevo hace que el adapter se niegue a abrir.
 
 ## Cómo correrlo
 
 ```bash
 mvn verify                                        # compila con Error Prone/NullAway, tests, JaCoCo, Spotless
 mvn org.pitest:pitest-maven:mutationCoverage      # PIT sobre el dominio
+mvn org.pitest:pitest-maven:mutationCoverage \
+  -DtargetClasses='io.github.federiconbaez.outbox.adapter.sqlite.*' \
+  -DexcludedTestClasses='*ArchitectureTest'       # PIT sobre el adapter SQLite
 ```
 
-Requiere JDK 21 y Maven 3.9.
+Uso del adapter durable:
+
+```java
+try (var db = SqliteOutboxDatabase.open(Path.of("outbox.db"))) {
+  var writer = new OutboxWriter(db, clock, ids);
+  var relay = new Relay(new RelayId("r1"), db, publisher, clock, random, config);
+  relay.runOnce();
+}
+```
+
+Requiere JDK 21 y Maven 3.9. `sqlite-jdbc` trae la biblioteca nativa para Linux, macOS y Windows.
 
 ## Cómo contarlo en una entrevista
 
@@ -106,8 +152,9 @@ Requiere JDK 21 y Maven 3.9.
 - **Cómo lo validé**: dominio puro con 100 % de ramas y 98,8 % de mutantes muertos, propiedades
   jqwik sobre el sistema completo, y una prueba de que la propiedad de exclusión detecta un bug
   plantado.
-- **Qué haría en producción**: `SELECT ... FOR UPDATE SKIP LOCKED` para `claimDue`, reloj de la
-  base, TTL en la tabla de dedupe, métricas de antigüedad del mensaje más viejo pendiente y
+- **Qué haría en producción**: un adapter Postgres que pase la misma suite de contrato, con
+  `SELECT ... FOR UPDATE SKIP LOCKED` para `claimDue`. SQLite ya demuestra que el contrato se
+  sostiene con I/O real, pero serializa a los escritores. Además: reloj de la base, TTL en la tabla de dedupe, métricas de antigüedad del mensaje más viejo pendiente y
   alertas sobre la cuarentena.
 
 ## Licencia

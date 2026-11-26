@@ -1,4 +1,4 @@
-package io.github.federiconbaez.outbox.adapter.inmemory;
+package io.github.federiconbaez.outbox.adapter.contract;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -33,13 +33,13 @@ import org.junit.jupiter.api.Test;
  * Suite de contrato de {@link OutboxStore} + {@link UnitOfWork}. Cualquier adapter (JDBC, etc.)
  * debería extenderla y pasarla sin cambios.
  */
-abstract class OutboxStoreContract {
-  static final Instant T0 = Instant.parse("2026-01-01T00:00:00Z");
-  static final Duration LEASE = Duration.ofSeconds(30);
-  static final RelayId A = new RelayId("a");
-  static final RelayId B = new RelayId("b");
+public abstract class OutboxStoreContract {
+  protected static final Instant T0 = Instant.parse("2026-01-01T00:00:00Z");
+  protected static final Duration LEASE = Duration.ofSeconds(30);
+  protected static final RelayId A = new RelayId("a");
+  protected static final RelayId B = new RelayId("b");
 
-  record Subject(OutboxStore store, UnitOfWork unitOfWork) {}
+  public record Subject(OutboxStore store, UnitOfWork unitOfWork) {}
 
   protected abstract Subject create();
 
@@ -81,6 +81,21 @@ abstract class OutboxStoreContract {
     assertThat(store.find(new MessageId("m-1"))).isEmpty();
     commit(message("m-1", T0));
     assertThat(store.find(new MessageId("m-1"))).contains(message("m-1", T0));
+  }
+
+  @Test
+  void onlyPendingMessagesCanBeAppended() {
+    OutboxMessage claimed =
+        ((Result.Ok<OutboxMessage>) message("m-1", T0).claim(A, T0, LEASE)).value();
+    assertThatThrownBy(
+            () ->
+                uow.inTransaction(
+                    tx -> {
+                      tx.appendOutbox(claimed);
+                      return null;
+                    }))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(store.snapshot()).isEmpty();
   }
 
   @Test
@@ -145,6 +160,15 @@ abstract class OutboxStoreContract {
   }
 
   @Test
+  void transitionCannotChangeTheMessageId() {
+    commit(message("m-1", T0), message("m-2", T0));
+    OutboxMessage other = store.find(new MessageId("m-2")).orElseThrow();
+    assertThatThrownBy(() -> store.update(new MessageId("m-1"), m -> Result.ok(other)))
+        .isInstanceOf(IllegalStateException.class);
+    assertThat(store.find(new MessageId("m-1"))).contains(message("m-1", T0));
+  }
+
+  @Test
   void listsOnlyExpiredLeases() {
     commit(message("m-1", T0), message("m-2", T0), message("m-3", T0));
     store.claimDue(A, T0, LEASE, 1);
@@ -153,6 +177,27 @@ abstract class OutboxStoreContract {
     assertThat(store.expiredLeases(T0.plus(LEASE))).containsExactly(new MessageId("m-1"));
     assertThat(store.expiredLeases(T0.plusSeconds(100)))
         .containsExactlyInAnyOrder(new MessageId("m-1"), new MessageId("m-2"));
+  }
+
+  @Test
+  void dueTimeIsComparedWithNanosecondPrecision() {
+    commit(message("b", T0.plusNanos(500)), message("a", T0.plusNanos(1)));
+    assertThat(store.claimDue(A, T0, LEASE, 10)).isEmpty();
+    assertThat(store.claimDue(A, T0.plusNanos(499), LEASE, 10))
+        .extracting(m -> m.id().value())
+        .containsExactly("a");
+    assertThat(store.claimDue(A, T0.plusNanos(500), LEASE, 10))
+        .extracting(m -> m.id().value())
+        .containsExactly("b");
+  }
+
+  @Test
+  void snapshotKeepsInsertionOrderAcrossUpdates() {
+    commit(message("z", T0), message("a", T0));
+    commit(message("m", T0));
+    store.claimDue(A, T0, LEASE, 1);
+    assertThat(store.snapshot()).extracting(m -> m.id().value()).containsExactly("z", "a", "m");
+    assertThat(store.snapshot().get(0).status()).isInstanceOf(OutboxStatus.InFlight.class);
   }
 
   @Test
