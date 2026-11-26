@@ -40,6 +40,17 @@ jobs:
           k=sum(1 for m in ms if m.get('status')=='KILLED')
           print(f"PIT domain mutation score: {k}/{len(ms)} = {100*k/len(ms):.1f}%")
           PY
+      - name: mutation testing (PIT, SQLite adapter, threshold 80%)
+        run: |
+          mvn -B -ntp org.pitest:pitest-maven:mutationCoverage \
+            -DtargetClasses='io.github.federiconbaez.outbox.adapter.sqlite.*' \
+            -DexcludedTestClasses='*ArchitectureTest' -DmutationThreshold=80
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import xml.etree.ElementTree as ET
+          ms=list(ET.parse('target/pit-reports/mutations.xml').getroot())
+          k=sum(1 for m in ms if m.get('status')=='KILLED')
+          print(f"PIT SQLite adapter mutation score: {k}/{len(ms)} = {100*k/len(ms):.1f}%")
+          PY
       - name: gitleaks
         run: |
           curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz | tar xz gitleaks

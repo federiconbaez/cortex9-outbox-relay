@@ -1,6 +1,7 @@
 # CONTRACT — cortex9-outbox-relay (CX9-6203)
 
-Patrón **transactional outbox** en Java 21, hexagonal, sin frameworks, sin broker ni base reales.
+Patrón **transactional outbox** en Java 21, hexagonal, sin frameworks y sin broker real. Tiene un
+adapter durable SQLite (CX9-6204, ADR-0003).
 Este contrato se escribió antes del código y define qué se promete y qué no.
 
 ## Problema
@@ -65,16 +66,25 @@ negocio y un **relay** lo publica después, con reintentos.
 - `adapter.inmemory`: `InMemoryOutboxDatabase` (UnitOfWork + OutboxStore, con inyección de crash
   antes del commit y antes de la próxima marca), `InMemoryDedupeStore`, `ManualClock`,
   `SeededRandomSource`, `SequentialIdGenerator`, `SystemClock`.
+- `adapter.sqlite` (ADR-0003): `SqliteOutboxDatabase` (UnitOfWork + OutboxStore) y
+  `SqliteDedupeStore`. Usan transacciones `BEGIN IMMEDIATE` y esquema versionado
+  (`PRAGMA user_version`). Las fallas de infraestructura son `StorageException`. Es el único
+  paquete que puede depender de `java.sql`.
+- Todo adapter de `OutboxStore`/`UnitOfWork` debe pasar `OutboxStoreContract`, y todo adapter de
+  `DedupeStore` debe pasar `DedupeStoreContract`. Hoy las corren el fake en memoria y SQLite.
+- Una `Transition` no puede cambiar el id del mensaje: el store lanza `IllegalStateException`.
 - `adapter.fake`: `ScriptedPublisher` con fallos guionados por mensaje (incluye "entregado pero el
   ack se perdió").
 
 ## Fuera de alcance
-- Broker real (Kafka, RabbitMQ), base real, CDC/log tailing, orden global entre agregados,
-  métricas, persistencia del `DedupeStore`, limpieza de mensajes publicados.
+- Broker real (Kafka, RabbitMQ), base servidor (Postgres/MySQL), CDC/log tailing, orden global
+  entre agregados, métricas, limpieza de mensajes publicados, TTL del dedupe.
+- SQLite con varios hosts o sobre un sistema de archivos de red.
 - El orden de entrega por agregado **no** se garantiza tras reintentos.
 - Relojes desincronizados entre relays: se asume un `Clock` común (en producción, el de la base).
 
 ## Calidad exigida
 JUnit 5 con fakes escritos a mano (sin Mockito), propiedades jqwik, suite de contrato de
-`OutboxStore`, ArchUnit, JaCoCo de ramas en dominio, PIT en dominio >= 80 %, Error Prone + NullAway,
+`OutboxStore` y de `DedupeStore` contra cada adapter, ArchUnit, JaCoCo de ramas en dominio, PIT en
+dominio >= 80 % y en el adapter SQLite >= 80 %, Error Prone + NullAway,
 Spotless, gitleaks, CI verde en `main`. Licencia Apache-2.0.

@@ -81,4 +81,22 @@ class ArchitectureTest {
           .should()
           .dependOnClassesThat()
           .resideInAPackage("..adapter.inmemory..");
+
+  @ArchTest
+  static final ArchRule jdbcOnlyInsideTheSqliteAdapter =
+      noClasses()
+          .that()
+          .resideOutsideOfPackage("..adapter.sqlite..")
+          .should()
+          .dependOnClassesThat()
+          .resideInAnyPackage("java.sql..", "org.sqlite..");
+
+  @ArchTest
+  static final ArchRule sqliteAdapterDoesNotDependOnOtherAdapters =
+      noClasses()
+          .that()
+          .resideInAPackage("..adapter.sqlite..")
+          .should()
+          .dependOnClassesThat()
+          .resideInAnyPackage("..adapter.inmemory..", "..adapter.fake..");
 }

@@ -111,6 +111,9 @@ public final class InMemoryOutboxDatabase implements UnitOfWork, OutboxStore {
       }
       return switch (transition.apply(current)) {
         case Result.Ok<OutboxMessage> ok -> {
+          if (!ok.value().id().equals(id)) {
+            throw new IllegalStateException("transition changed the message id");
+          }
           outbox.put(id, ok.value());
           yield new UpdateOutcome.Updated(ok.value());
         }
